@@ -82,22 +82,33 @@ def send_success_alert(context):
 
 def log_success_to_db(dag_id, execution_date_time, success_message,hospital_code,hospital_name):
     hook = PostgresHook(postgres_conn_id='aiimsnew_destination_connection')
-    insert_sql = """
-    INSERT INTO airflow_success_log (dag_id, execution_date_time, success_message, hospital_code, hospital_name)
-    VALUES (%s, %s, %s, %s,%s);
-    """
-    hook.run(insert_sql, parameters=(dag_id, execution_date_time, success_message,hospital_code,hospital_name))
+    conn = hook.get_conn()
+    try:
+        insert_sql = """
+        INSERT INTO airflow_success_log (dag_id, execution_date_time, success_message, hospital_code, hospital_name)
+        VALUES (%s, %s, %s, %s,%s);
+        """
+        hook.run(insert_sql, parameters=(dag_id, execution_date_time, success_message,hospital_code,hospital_name))
+        conn.commit()
+    finally:
+        logging.log('Closing the Connection after inserting the Success meta-data')
+        conn.close()
 
 
 def log_failure_to_db(task_id, dag_id, execution_date_time, exception,No_of_retries,hospital_code,hospital_name):
     print('Entering the Data into the fail table as the task fails')
     hook = PostgresHook(postgres_conn_id='aiimsnew_destination_connection')
-    insert_sql2 = """
-    INSERT INTO airflow_fail_log (task_id, dag_id, execution_date_time, error_message,retry_count,hospital_code, hospital_name)
-    VALUES (%s, %s, %s, %s,%s,%s,%s);
-    """
-    hook.run(insert_sql2, parameters=(task_id, dag_id, execution_date_time, exception,No_of_retries,hospital_code,hospital_name))
-    hook.get_conn().commit()  
+    conn = hook.get_conn()
+    try:
+        insert_sql2 = """
+        INSERT INTO airflow_fail_log (task_id, dag_id, execution_date_time, error_message,retry_count,hospital_code, hospital_name)
+        VALUES (%s, %s, %s, %s,%s,%s,%s);
+        """
+        hook.run(insert_sql2, parameters=(task_id, dag_id, execution_date_time, exception,No_of_retries,hospital_code,hospital_name))
+        conn.commit()
+    finally:
+        logging.log('Closing the Connection after inserting the failure meta-data')
+        conn.close()
 
 def export_data_staging(**kwargs):
     pg_hook = PostgresHook(postgres_conn_id='Mang_UAT_source_conn',schema = 'aiims_manglagiri')
@@ -144,32 +155,33 @@ def export_data_staging(**kwargs):
     
     with open('/tmp/staging_data.csv', 'r') as file:
         read = csv.reader(file)
-        print('printing the rows:')
+        print('printing the rows from Stagging area:')
         for rows in read:
             print(rows)
 
 def load_csv_to_postgres():
     # Create a PostgresHook instance
-    hook = PostgresHook(postgres_conn_id='aiimsnew_destination_connection')
-    
+    hook = PostgresHook(postgres_conn_id='aiimsnew_destination_connection',schema = 'aiimsnew')
+    conn = hook.get_conn()
     # Open the CSV file
-    with open('/tmp/staging_data.csv', 'r') as f:
-        reader = csv.reader(f)
-        next(reader)  # Skip the header row
+    try:
+        with open('/tmp/staging_data.csv', 'r') as f:
+            reader = csv.reader(f)
+            next(reader)  # Skip the header row
         
-        # Prepare the SQL update query
-        update_sql = """
-        UPDATE AIIMS_basic_stats
-        SET gnum_total_req_raise = %s, gnum_total_sample_collected = %s, gnum_total_report_generated = %s
-        WHERE trunc(gdt_entry_date) = trunc(sysdate);
-        """
+            # Prepare the SQL update query
+            update_sql = """
+            UPDATE AIIMS_basic_stats
+            SET gnum_total_req_raise = %s, gnum_total_sample_collected = %s, gnum_total_report_generated = %s
+            WHERE trunc(gdt_entry_date) = trunc(sysdate);
+            """
         
-        # Iterate over the CSV rows and update data in PostgreSQL
-        for row in reader:
-            hook.run(update_sql, parameters=(row[0], row[1], row[2]))
-    
-    # Commit the transaction
-    hook.get_conn().commit()
+            # Iterate over the CSV rows and update data in PostgreSQL
+            for row in reader:
+                hook.run(update_sql, parameters=(row[0], row[1], row[2]))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 
