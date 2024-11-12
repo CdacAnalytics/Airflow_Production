@@ -72,32 +72,42 @@ def send_success_alert(context):
     ti = context['ti']
     hospital_code = ti.xcom_pull(key='hospital_code', task_ids='export_data_to_csv')
     hospital_name = ti.xcom_pull(key='hospital_name', task_ids='export_data_to_csv')
-
     print('Hospital Code:', hospital_code)
     print('Hospital Name:', hospital_name)
-
     success_message = f'Task {task_id} in DAG {dag_id} succeeded on {execution_date_time}.'
     log_success_to_db(dag_id, execution_date_time, success_message,hospital_code,hospital_name)
 
 
 def log_success_to_db(dag_id, execution_date_time, success_message,hospital_code,hospital_name):
     hook = PostgresHook(postgres_conn_id='aiimsnew_destination_connection')
-    insert_sql = """
-    INSERT INTO airflow_success_log (dag_id, execution_date_time, success_message, hospital_code, hospital_name)
-    VALUES (%s, %s, %s, %s,%s);
-    """
-    hook.run(insert_sql, parameters=(dag_id, execution_date_time, success_message,hospital_code,hospital_name))
+    conn = hook.get_conn()
+    try:
+        insert_sql = """
+        INSERT INTO airflow_success_log (dag_id, execution_date_time, success_message, hospital_code, hospital_name)
+        VALUES (%s, %s, %s, %s, %s);
+        """
+        # Execute the SQL insert
+        hook.run(insert_sql, parameters=(dag_id, execution_date_time, success_message, hospital_code, hospital_name))
+        conn.commit()
+    finally:
+        logging.log('Closing the Connection after inserting the Success meta-data')
+        conn.close()
 
 
 def log_failure_to_db(task_id, dag_id, execution_date_time, exception,No_of_retries,hospital_code,hospital_name):
     print('Entering the Data into the fail table as the task fails')
     hook = PostgresHook(postgres_conn_id='aiimsnew_destination_connection')
-    insert_sql2 = """
-    INSERT INTO airflow_fail_log (task_id, dag_id, execution_date_time, error_message,retry_count,hospital_code, hospital_name)
-    VALUES (%s, %s, %s, %s,%s,%s,%s);
-    """
-    hook.run(insert_sql2, parameters=(task_id, dag_id, execution_date_time, exception,No_of_retries,hospital_code,hospital_name))
-    hook.get_conn().commit() 
+    conn = hook.get_conn()
+    try:
+        insert_sql2 = """
+        INSERT INTO airflow_fail_log (task_id, dag_id, execution_date_time, error_message,retry_count,hospital_code, hospital_name)
+        VALUES (%s, %s, %s, %s,%s,%s,%s);
+        """
+        hook.run(insert_sql2, parameters=(task_id, dag_id, execution_date_time, exception,No_of_retries,hospital_code,hospital_name))
+        conn.commit()
+    finally:
+        logging.log('Closing the Connection after inserting the failure meta-data')
+        conn.close()
 
 def export_data_staging(**kwargs):
     pg_hook = PostgresHook(postgres_conn_id='Mang_UAT_source_conn',schema = 'aiims_manglagiri')
@@ -119,7 +129,7 @@ def export_data_staging(**kwargs):
 	        AND hrgnum_visit_type<>3
 	        AND TRUNC(gdt_entry_date) >= TRUNC(ADD_MONTHS(SYSDATE, -1), 'MM')  -- Start of the previous month
 	        AND TRUNC(gdt_entry_date)<TRUNC(SYSDATE, 'MM')-1
-	        group by 1,2,3,4
+	        group by Hospital_code,Month,YEAR,is_rx
 
 	        UNION ALL
 
@@ -136,7 +146,7 @@ def export_data_staging(**kwargs):
 	        AND hrgnum_visit_type<>3
 	        AND TRUNC(gdt_entry_date) >= TRUNC(ADD_MONTHS(SYSDATE, -1), 'MM')  -- Start of the previous month
 	        AND TRUNC(gdt_entry_date)<TRUNC(SYSDATE, 'MM')-1
-	        group by 1,2,3,4
+	        group by Hospital_code,Month,YEAR,is_rx
         )
         select 
                 O.hospital_code as Hospital_code, 
@@ -150,7 +160,7 @@ def export_data_staging(**kwargs):
 
         from total_opd O, gblt_hospital_mst H
 		where O.hospital_code = H.gnum_hospital_code
-        group by 1,2,7,8;
+        group by Hospital_code,hospital_name,Month,Year;
             '''
     
     cursor.execute(query)
@@ -183,25 +193,29 @@ def export_data_staging(**kwargs):
             print(rows)
 
 def load_csv_to_postgres():
-    hook = PostgresHook(postgres_conn_id='aiimsnew_destination_connection')
-    
-    with open('/tmp/staging_data.csv', 'r') as f:
-        reader = csv.reader(f)
-        next(reader)  # Skip the header row
-        
-        # Prepare the SQL insert query
-        insert_sql = """
-        INSERT INTO AIIMS_basic_stats (gnum_hospital_code, gstr_hospital_name, gnum_new_visit, gnum_old_visit,
-        gnum_total_visit, gnum_total_rx_count, gnum_month_no, gnum_year) 
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
-        """
-        
-        # Iterate over the CSV rows and insert data into PostgreSQL
-        for row in reader:
-            hook.run(insert_sql, parameters=(row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7]))
-    
-    # Commit the transaction
-    hook.get_conn().commit()
+    hook = PostgresHook(postgres_conn_id='aiimsnew_destination_connection', schema='aiimsnew')
+    # Get the connection
+    conn = hook.get_conn()
+
+    try:
+        with open('/tmp/staging_data.csv', 'r') as f:
+            reader = csv.reader(f)
+            next(reader)  # Skip the header row
+            # Prepare the SQL insert query
+            insert_sql = """
+            INSERT INTO AIIMS_basic_stats (gnum_hospital_code, gstr_hospital_name, gnum_new_visit, gnum_old_visit,
+            gnum_total_visit, gnum_total_rx_count, gnum_month_no, gnum_year) 
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
+            """
+            # Iterate over the CSV rows and insert data into PostgreSQL
+            for row in reader:
+                hook.run(insert_sql, parameters=(row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7]))
+        conn.commit()
+    finally:
+        #Finally block ensures tha evenif the code runs the finally block will always execute
+        logging.log('Closing the Connection after inserting the main-data')
+        conn.close()
+        # After every thing i am ending the connection 
 
 
 
