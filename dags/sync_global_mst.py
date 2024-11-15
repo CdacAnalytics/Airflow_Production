@@ -88,7 +88,7 @@ def log_success_to_db(dag_id, execution_date_time, success_message,hospital_code
         hook.run(insert_sql, parameters=(dag_id, execution_date_time, success_message, hospital_code, hospital_name))
         conn.commit()
     finally:
-        logging.log('Closing the Connection after inserting the Success meta-data')
+        #logging.log('Closing the Connection after inserting the Success meta-data')
         conn.close()
 
 
@@ -104,7 +104,7 @@ def log_failure_to_db(task_id, dag_id, execution_date_time, exception,No_of_retr
         hook.run(insert_sql2, parameters=(task_id, dag_id, execution_date_time, exception,No_of_retries,hospital_code,hospital_name))
         conn.commit()
     finally:
-        logging.log('Closing the Connection after inserting the failure meta-data')
+        #logging.log('Closing the Connection after inserting the failure meta-data')
         conn.close()
 
 #main logic -----------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -112,161 +112,255 @@ def log_failure_to_db(task_id, dag_id, execution_date_time, exception,No_of_retr
 def export_data_staging(**kwargs):
     pg_hook = PostgresHook(postgres_conn_id='Mang_UAT_source_conn',schema = 'aiims_manglagiri')
     fetch_col = PostgresHook(postgres_conn_id='fetch_columns',schema = 'aiims_manglagiri')
-    #destination_hook = PostgresHook(postgres_conn_id='abdm_uat_connection', schema='aiimsnew')
+
     conn = pg_hook.get_conn()
     cursor = conn.cursor()
-    '''NO: Change the query to sysdate or currect date ''' 
-    row_cnt = '''
-                SELECT count(*) 
-                FROM aiims_basic_stats 
+
+    # Fetching the table names
+    get_table_names = '''
+        select str_table_name as Table_names from sync_table_name_mst;
+    '''
+    table_conn = fetch_col.get_conn()
+    table_cursor = table_conn.cursor()
+    table_cursor.execute(get_table_names)
+    table_names = table_cursor.fetchall()
+
+
+  # Extract table names from tuples
+    tables = [table[0] for table in table_names]
+    print('Table names:', tables)
+
+    for table_name in tables:
+        print(f"\nProcessing table: {table_name}")
+    
+        # Check for rows in the last 10 minutes for the current table
+        row_cnt_query = f'''
+            SELECT count(*) 
+            FROM {table_name} 
+            WHERE gdt_entry_date BETWEEN NOW() - INTERVAL '10 minutes' AND NOW();
+            '''
+        cursor.execute(row_cnt_query)
+        row_count = cursor.fetchone()[0]
+    
+        print(f'Row count in last 10 minutes for {table_name}:', row_count)
+    
+        if row_count > 0:
+            # Query to get all rows from the last 10 minutes for the current table
+            data_query = f''' 
+                SELECT * 
+                FROM {table_name} 
                 WHERE gdt_entry_date BETWEEN NOW() - INTERVAL '10 minutes' AND NOW();
-            '''
-    cursor.execute(row_cnt)
-    rows = cursor.fetchall()
-
-    print('rows before 10 mins',rows)
-    if rows[0][0] > 0:
-        query = ''' 
-            SELECT * 
-            FROM aiims_basic_stats 
-            WHERE gdt_entry_date BETWEEN NOW() - INTERVAL '10 minutes' AND NOW();   
-            '''
-   
-        cursor.execute(query)
-        rows = cursor.fetchall()
-        print('printing the rows before sending it to stagging area:',rows,'Type of Rows',type(rows))
-
-        # Convert Decimal types to float/int
-        def convert_decimal(row):
-            # isinstant is used for checking if that variable is Decimal or not 
-            return [float(x) if isinstance(x, Decimal) else x for x in row]
-    
-        rows = [convert_decimal(row) for row in rows]
-
-        #fetching the columns:
-        col_conn = fetch_col.get_conn()
-        col_cursor = col_conn.cursor()
-
-        col_query = '''
-                select str_column_names 
-                from sync_table_name_mst
-                where str_table_name = 'AIIMS_basic_stats'      
-                and gnum_hospital_code = 100;
                 '''
-        col_cursor.execute(col_query)
-    
-        columns = col_cursor.fetchall()
-        columns = [col[0] for col in columns]  # Extract the column names from tuples
-        print('Printing the columns name:', columns)
-        # writing the data and after transfer, the data is deleted
-        # Writing the data to CSV using dynamic column names
-        with open('/tmp/staging_data.csv', 'w') as f:
-            #This creates the writer object which will be used to erite the csv file
-            writer = csv.writer(f)
-            #writes a single row to the CSV file, which will be the header row. 
-            writer.writerow(columns)  
-            writer.writerows(rows)
-    
-        #checking if the data is present at stagging area
-        with open('/tmp/staging_data.csv', 'r') as file:
-            read = csv.reader(file)
-            print('printing the rows from stagging area:')
-            for rows in read:
-                print(rows)
-    else:
-        print("No data found in the last 10 minutes. Terminating the DAG.")
-        raise AirflowSkipException("Terminating the DAG due to no data found.")
+            cursor.execute(data_query)
+            rows = cursor.fetchall()
+        
+            print(f'Rows from {table_name} before sending to staging area:', rows)
+
+            # Convert Decimal types to float/int
+            def convert_decimal(row):
+                return [float(x) if isinstance(x, Decimal) else x for x in row]
+        
+            rows = [convert_decimal(row) for row in rows]
+
+             #fetching the columns:
+            col_conn = fetch_col.get_conn()
+            col_cursor = col_conn.cursor()
+
+            # Fetch the column names for the current table
+            col_query = f'''
+                SELECT str_column_names 
+                FROM sync_table_name_mst
+                WHERE str_table_name = '{table_name}'      
+                AND gnum_hospital_code = 100;
+                '''
+            col_cursor.execute(col_query)
+            columns = col_cursor.fetchall()
+            columns = [col[0] for col in columns]  # Extract column names from tuples
+        
+            print(f'Column names for {table_name}:', columns)
+
+            # Write data to CSV
+            with open(f'/tmp/{table_name}_staging_data.csv', 'w') as f:
+                writer = csv.writer(f)
+                writer.writerow(columns)  
+                writer.writerows(rows)
+
+            # Checking if the data is present in the staging area
+            with open(f'/tmp/{table_name}_staging_data.csv', 'r') as file:
+                read = csv.reader(file)
+                print(f'Rows from staging area for {table_name}:')
+                for row in read:
+                    print(row)
+        else:
+            print(f"No data found in the last 10 minutes for {table_name}. Skipping this table.")
+            continue
 
 def transfering_to_abdm_DB():
     hook = PostgresHook(postgres_conn_id='abdm_connector', schema='abdm')
-    fetch_col = PostgresHook(postgres_conn_id='fetch_columns',schema = 'aiims_manglagiri')
+    pg_hook = PostgresHook(postgres_conn_id='Mang_UAT_source_conn', schema='aiims_manglagiri')
+    fetch_col = PostgresHook(postgres_conn_id='fetch_columns', schema='aiims_manglagiri')
+
+    # Connections and cursors
     col_conn = fetch_col.get_conn()
     col_cursor = col_conn.cursor()
+    conn = pg_hook.get_conn()
+    cursor = conn.cursor()
 
-    col_query = '''
-                select str_column_names 
-                from sync_table_name_mst
-                where str_table_name = 'AIIMS_basic_stats'      
-                and gnum_hospital_code = 100;
-                '''
-    col_cursor.execute(col_query)
-    # Get the columns (assuming str_column_names is a TEXT[] array)
-    columns = col_cursor.fetchone()[0]  # Fetch the first (and presumably only) row and access the array
+    # Fetching the table names
+    get_table_names = '''
+        SELECT str_table_name AS Table_names FROM sync_table_name_mst;
+    '''
+    table_conn = fetch_col.get_conn()
+    table_cursor = table_conn.cursor()
+    table_cursor.execute(get_table_names)
+    table_names = table_cursor.fetchall()
 
-    # If columns is returned as a list, just print and confirm
-    print('Printing the columns name:', columns)
-    # Build the SQL insert statement dynamically using the column names
-    insert_sql = f"""
-        INSERT INTO AIIMS_basic_stats ({', '.join(columns)})
-        VALUES ({', '.join(['%s'] * len(columns))});
-        """
+    # Extract table names from tuples
+    tables = [table[0] for table in table_names]
+    print('Table names:', tables)
 
-    # Getting the connection from the hook (ensure hook is defined and valid)
-    conn = hook.get_conn()
+    for table_name in tables:
+        print(f"\nProcessing table: {table_name}")
 
-    # Proceed with inserting data into PostgreSQL from the CSV file
-    try:
-        with open('/tmp/staging_data.csv', 'r') as f:
-            reader = csv.reader(f)
-            next(reader)  # Skip the header row
+        # Check for rows in the last 10 minutes for the current table
+        row_cnt_query = f'''
+            SELECT count(*) 
+            FROM {table_name} 
+            WHERE gdt_entry_date BETWEEN NOW() - INTERVAL '10 minutes' AND NOW();
+            '''
+        cursor.execute(row_cnt_query)
+        row_count = cursor.fetchone()[0]
+    
+        print(f'Row count in last 10 minutes for {table_name}:', row_count)
+
+        # If data exists, proceed with transfer
+        if row_count > 0:
+            # Log a message indicating that data exists for transfer
+            print(f"Data available for transfer from staging area for {table_name}.")
+
+            # Fetch column names for the current table
+            col_query = f'''
+                SELECT str_column_names 
+                FROM sync_table_name_mst
+                WHERE str_table_name = '{table_name}'
+                AND gnum_hospital_code = 100;
+            '''
+            col_cursor.execute(col_query)
         
-            # Iterate over CSV rows and insert into PostgreSQL
-            for row in reader:
-                # Convert empty strings to None
-                row = [None if col == '' else col for col in row]
-                hook.run(insert_sql, parameters=row)
-    
-        conn.commit()
+            # Get the columns (assuming str_column_names is a TEXT[] array)
+            columns = col_cursor.fetchone()[0]
+            print(f'Column names for {table_name}:', columns)
 
-    finally:
-        print("Closing the connection after inserting the data")  # Logging output
-        conn.close()
-    
+            # Build the SQL insert statement dynamically using the column names
+            insert_sql = f"""
+                INSERT INTO {table_name} ({', '.join(columns)})
+                VALUES ({', '.join(['%s'] * len(columns))});
+            """
+
+            # Get the connection from the hook
+            conn = hook.get_conn()
+            try:
+                # Insert data from the CSV in the staging area to PostgreSQL
+                with open(f'/tmp/{table_name}_staging_data.csv', 'r') as f:
+                    reader = csv.reader(f)
+                    next(reader)  # Skip the header row
+                
+                    # Iterate over CSV rows and insert into PostgreSQL
+                    for row in reader:
+                        # Convert empty strings to None
+                        row = [None if col == '' else col for col in row]
+                        hook.run(insert_sql, parameters=row)
+                    
+                conn.commit()
+                print(f"Data successfully inserted into {table_name}")
+            finally:
+                print(f"Closing the connection for {table_name}")
+                conn.close()
+
+        # Else condition for no data
+        else:
+            print(f"No updates in the last 10 minutes for {table_name}. Data transfer skipped.")
+
 def transfering_to_aiimsnew_DB():
     hook = PostgresHook(postgres_conn_id='aiimsnew_destination_connection', schema='aiimsnew')
     fetch_col = PostgresHook(postgres_conn_id='fetch_columns',schema = 'aiims_manglagiri')
+    pg_hook = PostgresHook(postgres_conn_id='Mang_UAT_source_conn', schema='aiims_manglagiri')
+
     col_conn = fetch_col.get_conn()
     col_cursor = col_conn.cursor()
 
-    col_query = '''
-                select str_column_names 
-                from sync_table_name_mst
-                where str_table_name = 'AIIMS_basic_stats'      
-                and gnum_hospital_code = 100;
-                '''
-    col_cursor.execute(col_query)
-    # Get the columns (assuming str_column_names is a TEXT[] array)
-    columns = col_cursor.fetchone()[0]  # Fetch the first (and presumably only) row and access the array
+    conn = pg_hook.get_conn()
+    cursor = conn.cursor()
 
-    # If columns is returned as a list, just print and confirm
-    print('Printing the columns name:', columns)
-    # Build the SQL insert statement dynamically using the column names
-    # Build the SQL insert statement dynamically using the column names
-    insert_sql = f"""
-        INSERT INTO aiims_basic_stats ({', '.join(columns)})
-        VALUES ({', '.join(['%s'] * len(columns))});
-        """
+    # Fetching the table names
+    get_table_names = '''
+        SELECT str_table_name AS Table_names FROM sync_table_name_mst;
+    '''
+    table_conn = fetch_col.get_conn()
+    table_cursor = table_conn.cursor()
+    table_cursor.execute(get_table_names)
+    table_names = table_cursor.fetchall()
 
-    # Getting the connection from the hook (ensure hook is defined and valid)
-    conn = hook.get_conn()
+    # Extract table names from tuples
+    tables = [table[0] for table in table_names]
+    print('Table names:', tables)
 
-    # Proceed with inserting data into PostgreSQL from the CSV file
-    try:
-        with open('/tmp/staging_data.csv', 'r') as f:
-            reader = csv.reader(f)
-            next(reader)  # Skip the header row
-        
-            # Iterate over CSV rows and insert into PostgreSQL
-            for row in reader:
-                # Convert empty strings to None
-                row = [None if col == '' else col for col in row]
-                hook.run(insert_sql, parameters=row)
+    for table_name in tables:
+        print(f"\nProcessing table: {table_name}")
+
+        # Check for rows in the last 10 minutes for the current table
+        row_cnt_query = f'''
+            SELECT count(*) 
+            FROM {table_name} 
+            WHERE gdt_entry_date BETWEEN NOW() - INTERVAL '10 minutes' AND NOW();
+            '''
+        cursor.execute(row_cnt_query)
+        row_count = cursor.fetchone()[0]
     
-        conn.commit()
-    finally:
-        print("Closing the connection after inserting the data")  # Logging output
-        conn.close()
+        print(f'Row count in last 10 minutes for {table_name}:', row_count)
 
+        if row_count > 0:
+            # Fetch column names for the current table
+            col_query = f'''
+                SELECT str_column_names 
+                FROM sync_table_name_mst
+                WHERE str_table_name = '{table_name}'
+                AND gnum_hospital_code = 100;
+            '''
+            col_cursor.execute(col_query)
+    
+            # Get the columns (assuming str_column_names is a TEXT[] array)
+            columns = col_cursor.fetchone()[0]  # Fetch the first (and presumably only) row and access the array
+            print(f'Column names for {table_name}:', columns)
+
+            # Build the SQL insert statement dynamically using the column names
+            insert_sql = f"""
+                INSERT INTO {table_name} ({', '.join(columns)})
+                VALUES ({', '.join(['%s'] * len(columns))});
+                """
+
+            # Get the connection from the hook
+            conn = hook.get_conn()
+            try:
+                # Proceed with inserting data into PostgreSQL from the CSV file
+                with open(f'/tmp/{table_name}_staging_data.csv', 'r') as f:
+                    reader = csv.reader(f)
+                    next(reader)  # Skip the header row
+            
+                    # Iterate over CSV rows and insert into PostgreSQL
+                    for row in reader:
+                        # Convert empty strings to None
+                        row = [None if col == '' else col for col in row]
+                        hook.run(insert_sql, parameters=row)
+                
+                conn.commit()
+                print(f"Data successfully inserted into {table_name}")
+            finally:
+                print(f"Closing the connection for {table_name}")
+                conn.close()
+         # Else condition for no data
+        else:
+            print(f"No updates in the last 10 minutes for {table_name}. Data transfer skipped.")
 
 
 
@@ -313,4 +407,4 @@ with DAG(
     on_success_callback=send_success_alert,
     on_failure_callback=send_alert
     )
-export_task >> [load_data_ABDM, load_data_aiimsnew]
+export_task  >> [load_data_ABDM, load_data_aiimsnew]
